@@ -869,8 +869,28 @@ def main():
         multi-GB models on small boxes)."""
         return {k: (v.cpu() if torch.is_tensor(v) else v) for k, v in sd.items()}
 
-    def save_ckpt(directory, epoch):
+    def save_ckpt(directory, epoch, only=None):
+        """Full rolling checkpoint, or (only='trader_a'/'trader_b') a small
+        best-policy snapshot with just that trader's weights - keeps disk
+        usage bounded on small machines."""
         os.makedirs(directory, exist_ok=True)
+        if only in ("trader_a", "trader_b"):
+            model = trader_a if only == "trader_a" else trader_b
+            torch.save({"model": _cpu_sd(model.state_dict()), "epoch": epoch,
+                        "lr_mult": mult_a if only == "trader_a" else mult_b},
+                       os.path.join(directory, f"{only}.pt"))
+            return
+        # disk guard: prune best-* snapshots if space runs low
+        try:
+            if os.statvfs(args.out).f_bavail * os.statvfs(args.out).f_frsize < 10e9:
+                for _b in ("best_a", "best_b"):
+                    _p = os.path.join(args.out, "ckpt", _b)
+                    if os.path.isdir(_p):
+                        import shutil
+                        shutil.rmtree(_p, ignore_errors=True)
+                        print(f"[ckpt] low disk: pruned {_p}", flush=True)
+        except Exception:
+            pass
         for name, model, opt, extra in (
             ("predictor", predictor, opt_p,
              {"sched_i": sched_p.i,
@@ -1049,14 +1069,16 @@ def main():
                                  "eval_hit_a": ev_res["a"]["hit"]})
                 if ev_res["a"]["mean"] > best_eval["a"]:
                     best_eval["a"] = ev_res["a"]["mean"]
-                    save_ckpt(os.path.join(args.out, "ckpt", "best_a"), epoch)
+                    save_ckpt(os.path.join(args.out, "ckpt", "best_a"), epoch,
+                              only="trader_a")
                 if not args.single_trader:
                     eval_row.update({"eval_mean_eq_b": ev_res["b"]["mean"],
                                      "eval_median_eq_b": ev_res["b"]["median"],
                                      "eval_hit_b": ev_res["b"]["hit"]})
                     if ev_res["b"]["mean"] > best_eval["b"]:
                         best_eval["b"] = ev_res["b"]["mean"]
-                        save_ckpt(os.path.join(args.out, "ckpt", "best_b"), epoch)
+                        save_ckpt(os.path.join(args.out, "ckpt", "best_b"), epoch,
+                                  only="trader_b")
 
             # ---- VRAM accounting
             for d in used_devices:
